@@ -1,5 +1,6 @@
 package com.example.text_recognation_ml_kit
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -35,12 +36,11 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import com.example.text_recognation_ml_kit.ui.theme.TextrecognationmlkitTheme
 import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.text.Text
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
-
-val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
 
 data class CambodianDrivingLicense(
     val surnameEnglish: String? = null,
@@ -58,95 +58,160 @@ data class CambodianDrivingLicense(
     val rawText: String = ""
 )
 
-suspend fun extractCambodianLicenseData(context: Context, drawableId: Int): CambodianDrivingLicense {
+private fun normalizeOcr(raw: String): String {
+    // Keep newlines; only squeeze internal spaces; fix common OCR typos.
+    val squeezed = raw
+        .lines()
+        .joinToString("\n") { it.trim().replace(Regex("\\s+"), " ") }
+    return squeezed
+        .replace(Regex("(?i)lssue"), "Issue")
+        .replace(Regex("(?i)Expir[yv]"), "Expiry")
+        .replace(Regex("(?i)Cateaories|Cateqories|Calegories"), "Categories")
+        .replace(Regex("(?i)CardGode|CardCodee"), "CardCode")
+        .replace(Regex("(?i)Natlonality|Natlonalily|Nati0nality"), "Nationality")
+        .replace(Regex("(?i)ts\\.mpwt\\.govJth"), "ts.mpwt.gov.kh")
+}
+
+
+@SuppressLint("DefaultLocale")
+private fun toIsoDateOrNull(rawDate: String?): String? {
+    if (rawDate.isNullOrBlank()) return null
+    val parts = rawDate.trim().split(Regex("\\D+"))
+    if (parts.size != 3) return null
+    val d = parts[0].toIntOrNull() ?: return null
+    val m = parts[1].toIntOrNull() ?: return null
+    var y = parts[2].toIntOrNull() ?: return null
+    if (y < 100) y = if (y >= 50) 1900 + y else 2000 + y
+    if (m !in 1..12 || d !in 1..31 || y !in 1900..2100) return null
+    return String.format("%04d-%02d-%02d", y, m, d)
+}
+
+private fun extractDatesSortedIso(allText: String): List<String> {
+    // Why: we only want dates, normalized and chronologically sorted.
+    val dateRegex = Regex("([0-9]{1,2}[-/.][0-9]{1,2}[-/.][0-9]{2,4})")
+
+    return dateRegex.findAll(allText)
+        .map { toIsoDateOrNull(it.groupValues[1]) }
+        .filterNotNull()
+        .sorted() as List<String>
+}
+
+private fun pickIssueAndExpiry(allText: String, dobIso: String?): Pair<String?, String?> {
+    val dateRegex = Regex("(\\d{1,2}[-/.]\\d{1,2}[-/.]\\d{2,4})")
+
+    // Explicit both-on-one-line pattern first
+    val both = Regex(
+        "(?is)\\bIssue\\s*Date\\b.*?(\\d{1,2}[-/.]\\d{1,2}[-/.]\\d{2,4}).*?\\bExpiry\\s*Date\\b.*?(\\d{1,2}[-/.]\\d{1,2}[-/.]\\d{2,4})"
+    ).find(allText)
+    if (both != null) {
+        val issueIso = toIsoDateOrNull(both.groupValues[1])
+        val expiryIso = toIsoDateOrNull(both.groupValues[2])
+        return issueIso to expiryIso
+    }
+
+    // Separate labels
+    val issueIso = Regex("(?is)\\bIssue\\s*Date\\b.*?(\\d{1,2}[-/.]\\d{1,2}[-/.]\\d{2,4})")
+        .find(allText)?.groupValues?.getOrNull(1)?.let { toIsoDateOrNull(it) }
+    val expiryIso = Regex("(?is)\\bExpiry\\s*Date\\b.*?(\\d{1,2}[-/.]\\d{1,2}[-/.]\\d{2,4})")
+        .find(allText)?.groupValues?.getOrNull(1)?.let { toIsoDateOrNull(it) }
+    if (issueIso != null || expiryIso != null) return issueIso to expiryIso
+
+    // Fallback: take all dates except the DoB; choose min as issue, max as expiry.
+    val allIso = dateRegex.findAll(allText)
+        .map { toIsoDateOrNull(it.groupValues[1]) }
+        .filterNotNull()
+        .filter { it != dobIso }
+        .toList()
+        .distinct()
+        .sorted()
+    if (allIso.size >= 2) return allIso.first() to allIso.last()
+    return null to null
+}
+
+suspend fun extractCambodianLicenseData(
+    context: Context,
+    drawableId: Int,
+): CambodianDrivingLicense {
     val bitmap: Bitmap = BitmapFactory.decodeResource(context.resources, drawableId)
     val image = InputImage.fromBitmap(bitmap, 0)
+    val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
     val minConfidence = 0.5f
 
-    try {
-        val visionText = recognizer.process(image).await()
-        val filteredTextBuilder = StringBuilder()
+    return try {
+        val visionText: Text = recognizer.process(image).await()
 
+        // Build a filtered text snapshot (guard against older APIs lacking confidence fields).
+        val filtered = StringBuilder()
         for (block in visionText.textBlocks) {
             for (line in block.lines) {
-                if (line.confidence >= minConfidence) {
-                    val lineText = line.elements.filter { it.confidence >= minConfidence }
-                        .joinToString(" ") { it.text }
-                    if (lineText.isNotBlank()) filteredTextBuilder.append(lineText).append("\n")
-                }
+                val lineOk = try { line?.confidence ?: 1f } catch (_: Throwable) { 1f } >= minConfidence
+                if (!lineOk) continue
+                val lineText = buildString {
+                    for (el in line.elements) {
+                        val elOk = try { el.confidence >= minConfidence } catch (_: Throwable) { true }
+                        if (elOk) append(el.text).append(' ')
+                    }
+                }.trim()
+                if (lineText.isNotBlank()) filtered.append(lineText).append('\n')
             }
         }
 
-        val allFilteredText = filteredTextBuilder.toString().trim()
-        val textLines = allFilteredText.split('\n').map { it.trim() }
+        val allFilteredText = filtered.toString().trim().ifEmpty { visionText.text }
+        val normalized = normalizeOcr(allFilteredText)
 
-        // Regex
-        val datePattern = Regex("(\\d{1,2}[-/.]\\d{1,2}[-/.]\\d{2,4})")
-        val idPattern = Regex("ID\\s*[:：]?\\s*([A-Z0-9]+)")
-        val cardCodePattern = Regex("([ABC]\\.[0-9]+)")
-        val categoryPattern = Regex("([ABCDE])")
-        var surnameEnglish: String? = null
-        var givenNameEnglish: String? = null
-        var idNumber: String? = null
-        var dob: String? = null
-        var sex: String? = null
-        var nationality: String? = null
-        var address: String? = null
-        var placeOfBirth: String? = null
-        var issueDate: String? = null
-        var expiryDate: String? = null
-        var category: String? = null
-        var cardCode: String? = null
+        // --- Regex parsing ---
+        val idNumber = Regex("(?i)\\bID\\b\\s*[:：-]?\\s*([A-Z0-9]{6,})").find(normalized)?.groupValues?.getOrNull(1)
 
-        for (i in textLines.indices) {
-            val line = textLines[i]
-            Log.d("MLKitTextRecognition", "Line $i: $line")
-            Log.d("MLKitTextRecognition", "Line $i: $line")
-            if (idNumber == null && idPattern.containsMatchIn(line)) idNumber = idPattern.find(line)?.groupValues?.get(1)
-            if (line.startsWith("Surname", true)) {
-                val name = extractValueAfterKeyword(line, "Surname & Name") ?: textLines.getOrNull(i+1)
-                if (!name.isNullOrBlank()) {
-                    val parts = name.split(" ", limit = 2)
-                    surnameEnglish = parts.getOrNull(0)
-                    givenNameEnglish = parts.getOrNull(1)
-                }
-            }
-            if (line.startsWith("Date Of Birth", true)) dob = datePattern.find(line)?.value ?: textLines.getOrNull(i+1)?.let { datePattern.find(it)?.value }
-            if (line.startsWith("Sex", true)) sex = extractValueAfterKeyword(line, "Sex") ?: textLines.getOrNull(i+1)
-            if (line.startsWith("Nationality", true)) nationality = extractValueAfterKeyword(line, "Nationality") ?: textLines.getOrNull(i+1)
-            if (line.startsWith("Address", true)) address = extractValueAfterKeyword(line, "Address") ?: textLines.getOrNull(i+1)
-            if (line.startsWith("Place Of Birth", true)) placeOfBirth = extractValueAfterKeyword(line, "Place Of Birth") ?: textLines.getOrNull(i+1)
-            if (line.contains("Issue Date", true)) issueDate = datePattern.find(line)?.value ?: textLines.getOrNull(i+1)?.let { datePattern.find(it)?.value }
-            if (line.contains("Expiry Date", true)) expiryDate = datePattern.find(line)?.value ?: textLines.getOrNull(i+1)?.let { datePattern.find(it)?.value }
-            if (line.startsWith("Categories", true)) {
-                category = categoryPattern.find(line)?.value
-                if (category.isNullOrBlank()) category = textLines.getOrNull(i+1)?.let { categoryPattern.find(it)?.value }
-            }
-            if (cardCode == null && cardCodePattern.containsMatchIn(line)) cardCode = cardCodePattern.find(line)?.groupValues?.get(1)
-        }
+        val cardCode = Regex("(?i)\\bCard\\s*Code\\b\\s*[:：-]?\\s*([A-Z]\\.[A-Z]{1,3}\\.[0-9]{5,})")
+            .find(normalized)?.groupValues?.getOrNull(1)
+            ?: Regex("\\b([A-Z]\\.[A-Z]{1,3}\\.[0-9]{5,})\\b").find(normalized)?.groupValues?.getOrNull(1)
 
-        return CambodianDrivingLicense(
+        val category = Regex("(?is)(?:\\bCategories?\\b).*?(?:\\n|\\s)([A-EDM](?:\\s*[,&/]\\s*[A-EDM])*)")
+            .find(normalized)?.groupValues?.getOrNull(1)?.trim()?.replace(" ", "")
+
+        val fullName = Regex("(?is)\\bSurname\\s*&\\s*Name\\b\\s*(?:\\n|\\s)+([A-Z][A-Z\\s]+)")
+            .find(normalized)?.groupValues?.getOrNull(1)?.trim()
+        val (surnameEnglish, givenNameEnglish) = if (!fullName.isNullOrBlank()) {
+            val parts = fullName.split(Regex("\\s+")).filter { it.isNotBlank() }
+            if (parts.size >= 2) parts.first() to parts.drop(1).joinToString(" ") else null to fullName
+        } else null to null
+
+        val sexRaw = Regex("(?is)\\bSex\\b\\s*(?:\\n|\\s)*([MF]|Male|Female)\\b")
+            .find(normalized)?.groupValues?.getOrNull(1)
+        val sex = when (sexRaw?.uppercase()) { "MALE", "M" -> "M"; "FEMALE", "F" -> "F"; else -> null }
+
+        val nationality = Regex("(?is)\\bNationality\\b\\s*(?:\\n|\\s)*([A-Za-z][A-Za-z ]+)")
+            .find(normalized)?.groupValues?.getOrNull(1)?.trim()?.split(" ")?.firstOrNull()
+            ?.replaceFirstChar { it.uppercase() }
+
+        val dobRaw = Regex("(?is)\\bDate\\s*Of\\s*Birth\\b.*?(\\d{1,2}[-/.]\\d{1,2}[-/.]\\d{2,4})")
+            .find(normalized)?.groupValues?.getOrNull(1)
+        val dobIso = toIsoDateOrNull(dobRaw)
+
+        val (issueIso, expiryIso) = pickIssueAndExpiry(normalized, dobIso)
+
+        Log.d("LicenseParse", "RAW\n$allFilteredText\n\nNORMALIZED\n$normalized")
+
+        CambodianDrivingLicense(
             surnameEnglish = surnameEnglish,
             givenNameEnglish = givenNameEnglish,
             idNumber = idNumber,
-            dateOfBirth = dob,
+            dateOfBirth = dobIso,
             sex = sex,
             nationality = nationality,
-            address = address,
-            placeOfBirth = placeOfBirth,
-            dateOfIssue = issueDate,
-            dateOfExpiry = expiryDate,
+            address = null,
+            placeOfBirth = null,
+            dateOfIssue = issueIso,
+            dateOfExpiry = expiryIso,
             category = category,
             cardCode = cardCode,
             rawText = allFilteredText
         )
-
     } catch (e: Exception) {
         Log.e("LicenseParse", "Error parsing license data", e)
-        return CambodianDrivingLicense(rawText = "Error: ${e.message}")
+        CambodianDrivingLicense(rawText = "Error: ${e.message}")
     }
 }
-
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -162,8 +227,6 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
-
-
     }
 }
 
@@ -188,15 +251,13 @@ fun TextRecognitionScreen(modifier: Modifier = Modifier) {
         Button(
             onClick = {
                 if (isLoading) return@Button // Prevent multiple clicks while loading
-
                 isLoading = true
                 recognizedText = "Processing..." // Update UI
                 scope.launch {
                      try {
                          isLoading = true
-                         // Clear previous data
-
                          val result = extractCambodianLicenseData(context, imageToRecognize)
+
                          // You can format the display text from the licenseData object
                          recognizedText = """
                              Surname (En): ${result.surnameEnglish ?: "N/A"}
@@ -210,7 +271,6 @@ fun TextRecognitionScreen(modifier: Modifier = Modifier) {
                              Category: ${result.category ?: "N/A"}
                              Card Code: ${result.cardCode ?: "N/A"}
                              Nationality: ${result.nationality ?: "N/A"}
-                             ---
                              Raw Filtered Text:
                              ${result.rawText}
                          """.trimIndent()
@@ -252,20 +312,6 @@ fun TextRecognitionScreen(modifier: Modifier = Modifier) {
             )
         }
     }
-}
-
-// Helper function to extract value after a keyword on the same line
-fun extractValueAfterKeyword(line: String, keyword: String, allowPartialKeywordMatch: Boolean = false): String? {
-    val keywordIndex = if (allowPartialKeywordMatch) line.indexOf(keyword) else line.lastIndexOf(keyword) // lastIndexOf for full keyword match
-    if (keywordIndex != -1) {
-        var value = line.substring(keywordIndex + keyword.length).trim()
-        // Remove common separators like ":" or "-" if they are right after the keyword
-        if (value.startsWith(":") || value.startsWith("-")) {
-            value = value.substring(1).trim()
-        }
-        return value.ifBlank { null }
-    }
-    return null
 }
 
 
