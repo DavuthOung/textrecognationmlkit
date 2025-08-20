@@ -1,7 +1,6 @@
 package com.example.text_recognation_ml_kit
 
 import android.annotation.SuppressLint
-import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.os.Bundle
@@ -9,13 +8,18 @@ import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
@@ -24,207 +28,77 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
-import com.example.text_recognation_ml_kit.ui.theme.TextrecognationmlkitTheme
-import com.google.mlkit.vision.common.InputImage
-import com.google.mlkit.vision.text.Text
-import com.google.mlkit.vision.text.TextRecognition
-import com.google.mlkit.vision.text.latin.TextRecognizerOptions
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.tasks.await
-
-data class CambodianDrivingLicense(
-    val surnameEnglish: String? = null,
-    val givenNameEnglish: String? = null,
-    val idNumber: String? = null,
-    val dateOfBirth: String? = null,
-    val sex: String? = null,
-    val nationality: String? = null,
-    val address: String? = null,
-    val placeOfBirth: String? = null,
-    val dateOfIssue: String? = null,
-    val dateOfExpiry: String? = null,
-    val category: String? = null,
-    val cardCode: String? = null,
-    val rawText: String = ""
-)
-
-private fun normalizeOcr(raw: String): String {
-    // Keep newlines; only squeeze internal spaces; fix common OCR typos.
-    val squeezed = raw
-        .lines()
-        .joinToString("\n") { it.trim().replace(Regex("\\s+"), " ") }
-    return squeezed
-        .replace(Regex("(?i)lssue"), "Issue")
-        .replace(Regex("(?i)Expir[yv]"), "Expiry")
-        .replace(Regex("(?i)Cateaories|Cateqories|Calegories"), "Categories")
-        .replace(Regex("(?i)CardGode|CardCodee"), "CardCode")
-        .replace(Regex("(?i)Natlonality|Natlonalily|Nati0nality"), "Nationality")
-        .replace(Regex("(?i)ts\\.mpwt\\.govJth"), "ts.mpwt.gov.kh")
-}
+import com.example.text_recognation_ml_kit.ui.theme.ScanTheme
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 
 
-@SuppressLint("DefaultLocale")
-private fun toIsoDateOrNull(rawDate: String?): String? {
-    if (rawDate.isNullOrBlank()) return null
-    val parts = rawDate.trim().split(Regex("\\D+"))
-    if (parts.size != 3) return null
-    val d = parts[0].toIntOrNull() ?: return null
-    val m = parts[1].toIntOrNull() ?: return null
-    var y = parts[2].toIntOrNull() ?: return null
-    if (y < 100) y = if (y >= 50) 1900 + y else 2000 + y
-    if (m !in 1..12 || d !in 1..31 || y !in 1900..2100) return null
-    return String.format("%04d-%02d-%02d", y, m, d)
-}
-
-private fun extractDatesSortedIso(allText: String): List<String> {
-    // Why: we only want dates, normalized and chronologically sorted.
-    val dateRegex = Regex("([0-9]{1,2}[-/.][0-9]{1,2}[-/.][0-9]{2,4})")
-
-    return dateRegex.findAll(allText)
-        .map { toIsoDateOrNull(it.groupValues[1]) }
-        .filterNotNull()
-        .sorted() as List<String>
-}
-
-private fun pickIssueAndExpiry(allText: String, dobIso: String?): Pair<String?, String?> {
-    val dateRegex = Regex("(\\d{1,2}[-/.]\\d{1,2}[-/.]\\d{2,4})")
-
-    // Explicit both-on-one-line pattern first
-    val both = Regex(
-        "(?is)\\bIssue\\s*Date\\b.*?(\\d{1,2}[-/.]\\d{1,2}[-/.]\\d{2,4}).*?\\bExpiry\\s*Date\\b.*?(\\d{1,2}[-/.]\\d{1,2}[-/.]\\d{2,4})"
-    ).find(allText)
-    if (both != null) {
-        val issueIso = toIsoDateOrNull(both.groupValues[1])
-        val expiryIso = toIsoDateOrNull(both.groupValues[2])
-        return issueIso to expiryIso
-    }
-
-    // Separate labels
-    val issueIso = Regex("(?is)\\bIssue\\s*Date\\b.*?(\\d{1,2}[-/.]\\d{1,2}[-/.]\\d{2,4})")
-        .find(allText)?.groupValues?.getOrNull(1)?.let { toIsoDateOrNull(it) }
-    val expiryIso = Regex("(?is)\\bExpiry\\s*Date\\b.*?(\\d{1,2}[-/.]\\d{1,2}[-/.]\\d{2,4})")
-        .find(allText)?.groupValues?.getOrNull(1)?.let { toIsoDateOrNull(it) }
-    if (issueIso != null || expiryIso != null) return issueIso to expiryIso
-
-    // Fallback: take all dates except the DoB; choose min as issue, max as expiry.
-    val allIso = dateRegex.findAll(allText)
-        .map { toIsoDateOrNull(it.groupValues[1]) }
-        .filterNotNull()
-        .filter { it != dobIso }
-        .toList()
-        .distinct()
-        .sorted()
-    if (allIso.size >= 2) return allIso.first() to allIso.last()
-    return null to null
-}
-
-suspend fun extractCambodianLicenseData(
-    context: Context,
-    drawableId: Int,
-): CambodianDrivingLicense {
-    val bitmap: Bitmap = BitmapFactory.decodeResource(context.resources, drawableId)
-    val image = InputImage.fromBitmap(bitmap, 0)
-    val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
-    val minConfidence = 0.5f
-
-    return try {
-        val visionText: Text = recognizer.process(image).await()
-
-        // Build a filtered text snapshot (guard against older APIs lacking confidence fields).
-        val filtered = StringBuilder()
-        for (block in visionText.textBlocks) {
-            for (line in block.lines) {
-                val lineOk = try { line?.confidence ?: 1f } catch (_: Throwable) { 1f } >= minConfidence
-                if (!lineOk) continue
-                val lineText = buildString {
-                    for (el in line.elements) {
-                        val elOk = try { el.confidence >= minConfidence } catch (_: Throwable) { true }
-                        if (elOk) append(el.text).append(' ')
-                    }
-                }.trim()
-                if (lineText.isNotBlank()) filtered.append(lineText).append('\n')
-            }
-        }
-
-        val allFilteredText = filtered.toString().trim().ifEmpty { visionText.text }
-        val normalized = normalizeOcr(allFilteredText)
-
-        // --- Regex parsing ---
-        val idNumber = Regex("(?i)\\bID\\b\\s*[:：-]?\\s*([A-Z0-9]{6,})").find(normalized)?.groupValues?.getOrNull(1)
-
-        val cardCode = Regex("(?i)\\bCard\\s*Code\\b\\s*[:：-]?\\s*([A-Z]\\.[A-Z]{1,3}\\.[0-9]{5,})")
-            .find(normalized)?.groupValues?.getOrNull(1)
-            ?: Regex("\\b([A-Z]\\.[A-Z]{1,3}\\.[0-9]{5,})\\b").find(normalized)?.groupValues?.getOrNull(1)
-
-        val category = Regex("(?is)(?:\\bCategories?\\b).*?(?:\\n|\\s)([A-EDM](?:\\s*[,&/]\\s*[A-EDM])*)")
-            .find(normalized)?.groupValues?.getOrNull(1)?.trim()?.replace(" ", "")
-
-        val fullName = Regex("(?is)\\bSurname\\s*&\\s*Name\\b\\s*(?:\\n|\\s)+([A-Z][A-Z\\s]+)")
-            .find(normalized)?.groupValues?.getOrNull(1)?.trim()
-        val (surnameEnglish, givenNameEnglish) = if (!fullName.isNullOrBlank()) {
-            val parts = fullName.split(Regex("\\s+")).filter { it.isNotBlank() }
-            if (parts.size >= 2) parts.first() to parts.drop(1).joinToString(" ") else null to fullName
-        } else null to null
-
-        val sexRaw = Regex("(?is)\\bSex\\b\\s*(?:\\n|\\s)*([MF]|Male|Female)\\b")
-            .find(normalized)?.groupValues?.getOrNull(1)
-        val sex = when (sexRaw?.uppercase()) { "MALE", "M" -> "M"; "FEMALE", "F" -> "F"; else -> null }
-
-        val nationality = Regex("(?is)\\bNationality\\b\\s*(?:\\n|\\s)*([A-Za-z][A-Za-z ]+)")
-            .find(normalized)?.groupValues?.getOrNull(1)?.trim()?.split(" ")?.firstOrNull()
-            ?.replaceFirstChar { it.uppercase() }
-
-        val dobRaw = Regex("(?is)\\bDate\\s*Of\\s*Birth\\b.*?(\\d{1,2}[-/.]\\d{1,2}[-/.]\\d{2,4})")
-            .find(normalized)?.groupValues?.getOrNull(1)
-        val dobIso = toIsoDateOrNull(dobRaw)
-
-        val (issueIso, expiryIso) = pickIssueAndExpiry(normalized, dobIso)
-
-        Log.d("LicenseParse", "RAW\n$allFilteredText\n\nNORMALIZED\n$normalized")
-
-        CambodianDrivingLicense(
-            surnameEnglish = surnameEnglish,
-            givenNameEnglish = givenNameEnglish,
-            idNumber = idNumber,
-            dateOfBirth = dobIso,
-            sex = sex,
-            nationality = nationality,
-            address = null,
-            placeOfBirth = null,
-            dateOfIssue = issueIso,
-            dateOfExpiry = expiryIso,
-            category = category,
-            cardCode = cardCode,
-            rawText = allFilteredText
-        )
-    } catch (e: Exception) {
-        Log.e("LicenseParse", "Error parsing license data", e)
-        CambodianDrivingLicense(rawText = "Error: ${e.message}")
-    }
-}
+const val TAG = "ObjectDetectionDemo"
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent {
-            TextrecognationmlkitTheme {
+            ScanTheme {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background
                 ) {
-                    TextRecognitionScreen()
+                    ScanScreen()
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CropCard(crop: CroppedDetection) {
+    Card(
+        modifier = Modifier
+            .width(180.dp)
+            .height(180.dp),
+        elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
+    ) {
+        Box(Modifier.fillMaxSize()) {
+            Image(
+                bitmap = crop.bitmap.asImageBitmap(),
+                contentDescription = "${crop.label.text} crop",
+                modifier = Modifier.fillMaxSize()
+            )
+            // label ribbon
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(6.dp)
+                    .background(
+                        color = Color(0x88000000),
+                        shape = RoundedCornerShape(6.dp)
+                    )
+                    .padding(horizontal = 8.dp, vertical = 4.dp)
+            ) {
+                Text(
+                    text = "${crop.label.text}  ${(crop.label.confidence * 100f).toInt()}%",
+                    color = Color.White,
+                    style = MaterialTheme.typography.labelMedium
+                )
             }
         }
     }
@@ -232,93 +106,181 @@ class MainActivity : ComponentActivity() {
 
 
 @Composable
-fun TextRecognitionScreen(modifier: Modifier = Modifier) {
+fun ScanScreen(modifier: Modifier = Modifier) {
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
 
-    var recognizedText by remember { mutableStateOf("Tap 'Recognize Text' to start.") }
     var isLoading by remember { mutableStateOf(false) }
+    var errorMessage by remember { mutableStateOf<String?>(null) }
+    var imageBitmap by remember { mutableStateOf<Bitmap?>(null) }
 
-    val imageToRecognize = R.drawable.test2
+    var crops: CroppedDetection
+
+    // We’ll keep your state shape but use our own Label class
+    val detectedObjectsInfo by remember {
+        mutableStateOf<List<Pair<Rect, List<YoloLabel>>>>(emptyList())
+    }
+
+    // Create the YOLO interpreter once
+    val yolo by remember {
+        mutableStateOf(
+            YoloTFLite(
+                context = context,
+                modelPath = "models/mrz_best_float32.tflite",
+                scoreThreshold = 0.60f,          // <-- as you requested
+                iouThreshold = 0.50f
+            )
+        )
+    }
+
+    DisposableEffect(Unit) {
+        onDispose { yolo.close() }
+    }
+
+    fun runYolo(bitmap: Bitmap) {
+        isLoading = true
+        errorMessage = null
+        detectedObjectsInfo = emptyList()
+        imageBitmap = bitmap
+
+        try {
+            val dets: List<YoloDetection> = yolo.detect(bitmap)
+            // Crop with +6% padding and clamp to image, keep original size
+            crops = cropDetections(
+                src = bitmap,
+                detections = dets,
+                padPx = 0,
+                padRatio = 0.06f,       // add ~6% around each side
+                clampToImage = true
+            )
+
+            // Or: crop and resize each to 320x320 with letterbox (no distortion)
+            val crops320 = cropDetections(
+                src = bitmap,
+                detections = dets,
+                padPx = 4,
+                padRatio = 0.04f,
+                clampToImage = true,
+                targetWidth = 320,
+                targetHeight = 320,
+                letterbox = true
+            )
+
+            // Convert to Compose Rect (original image cords)
+            val processed = dets.map { d ->
+                val box = Rect(
+                    left = d.box.left,
+                    top = d.box.top,
+                    right = d.box.right,
+                    bottom = d.box.bottom
+                )
+                box to listOf(d.label)
+            }
+            detectedObjectsInfo = processed
+            isLoading = false
+
+            if (dets.isEmpty()) {
+                Log.i(TAG, "No objects detected.")
+            } else {
+                dets.forEachIndexed { idx, d ->
+                    Log.i(TAG, "Detection #$idx -> ${d.label.text} (${d.label.confidence.toStringWithDecimals(2)})")
+                    Log.i(TAG, "Rect: L=${d.box.left.toInt()} T=${d.box.top.toInt()} R=${d.box.right.toInt()} B=${d.box.bottom.toInt()}")
+                }
+            }
+        } catch (e: Exception) {
+            isLoading = false
+            errorMessage = "Detection failed: ${e.localizedMessage}"
+            Log.e(TAG, "YOLO detection error", e)
+        }
+    }
+
+    @SuppressLint("LocalContextResourcesRead")
+    fun loadAndProcessSampleImage() {
+        try {
+            val sampleBitmap = BitmapFactory.decodeResource(context.resources, R.drawable.idcard1)
+            runYolo(sampleBitmap)
+        } catch (e: Exception) {
+            errorMessage = "Error loading sample image: ${e.localizedMessage}"
+            Log.e(TAG, "Error loading sample image", e)
+        }
+    }
 
     Column(
         modifier = modifier
             .fillMaxSize()
-            .padding(top = 40.dp),
+            .padding(top = 50.dp)
+            .verticalScroll(rememberScrollState()),
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Top
+        verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        Button(
-            onClick = {
-                if (isLoading) return@Button // Prevent multiple clicks while loading
-                isLoading = true
-                recognizedText = "Processing..." // Update UI
-                scope.launch {
-                     try {
-                         isLoading = true
-                         val result = extractCambodianLicenseData(context, imageToRecognize)
+        Button(onClick = { loadAndProcessSampleImage() }) {
+            Text("Detect Objects in Sample Image")
+        }
 
-                         // You can format the display text from the licenseData object
-                         recognizedText = """
-                             Surname (En): ${result.surnameEnglish ?: "N/A"}
-                             Given Name (EN): ${result.givenNameEnglish ?: "N/A"}
-                             Sex: ${result.sex ?: "N/A"}
-                             ID No: ${result.idNumber ?: "N/A"}
-                             DOB: ${result.dateOfBirth ?: "N/A"}
-                             Address: ${result.address ?: "N/A"}
-                             Expiry: ${result.dateOfExpiry ?: "N/A"}
-                             Issue: ${result.dateOfIssue ?: "N/A"}
-                             Category: ${result.category ?: "N/A"}
-                             Card Code: ${result.cardCode ?: "N/A"}
-                             Nationality: ${result.nationality ?: "N/A"}
-                             Raw Filtered Text:
-                             ${result.rawText}
-                         """.trimIndent()
-                    } catch (e: Exception) {
-                        recognizedText = "Error parsing license: ${e.localizedMessage}"
-                    } finally {
-                        isLoading = false
+        if (isLoading) CircularProgressIndicator()
+
+        errorMessage?.let { Text(text = "Error: $it", color = MaterialTheme.colorScheme.error) }
+
+        imageBitmap?.let { bmp ->
+            Box {
+                Image(
+                    bitmap = bmp.asImageBitmap(),
+                    contentDescription = "Processed Image",
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Canvas(modifier = Modifier.matchParentSize()) {
+                    val scaleX = size.width / bmp.width.toFloat()
+                    val scaleY = size.height / bmp.height.toFloat()
+
+                    detectedObjectsInfo.forEach { (box) ->
+                        val scaledLeft = box.left * scaleX
+                        val scaledTop = box.top * scaleY
+                        val scaledRight = box.right * scaleX
+                        val scaledBottom = box.bottom * scaleY
+
+                        drawRect(
+                            color = Color.Red,
+                            topLeft = androidx.compose.ui.geometry.Offset(scaledLeft, scaledTop),
+                            size = androidx.compose.ui.geometry.Size(
+                                scaledRight - scaledLeft,
+                                scaledBottom - scaledTop
+                            ),
+                            style = Stroke(width = 2.dp.toPx())
+                        )
                     }
                 }
-            },
-            modifier = Modifier.fillMaxWidth(),
-            enabled = !isLoading
-        ) {
-            Text("Recognize Text from Static Image")
+            }
         }
 
-        Spacer(modifier = Modifier.height(16.dp))
+        if (crops.isNotEmpty()) {
+            Text("Cropped Results:", style = MaterialTheme.typography.headlineSmall)
+            Spacer(Modifier.height(8.dp))
 
-        if (isLoading) {
-            CircularProgressIndicator()
-            Spacer(modifier = Modifier.height(16.dp))
+            LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                items(count = crops.size, key = { idx -> "${crops[idx].label.index}-$idx" }) { idx ->
+                    CropCard(crop = crops[idx])
+                }
+            }
         }
 
-        Text(
-            text = "Recognized Text:",
-            style = MaterialTheme.typography.titleMedium
-        )
-        Spacer(modifier = Modifier.height(8.dp))
-        // Scrollable area for potentially long recognized text
-        Column(modifier = Modifier
-            .weight(1f) // Takes remaining space
-            .fillMaxWidth()
-            .verticalScroll(rememberScrollState()) // Make it scrollable
-            .padding(25.dp)
-        ) {
-            Text(
-                text = recognizedText,
-                style = MaterialTheme.typography.bodyMedium
-            )
+        if (detectedObjectsInfo.isNotEmpty()) {
+            Text("Detected Objects:", style = MaterialTheme.typography.headlineSmall)
+            detectedObjectsInfo.forEach { (box, labels) ->
+                Text("Bounding Box: $box")
+                labels.forEach { label ->
+                    Text("  - Label: ${label.text}, Confidence: ${label.confidence.toStringWithDecimals(2)}")
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+            }
+        } else if (!isLoading && errorMessage == null) {
+            Text("No objects detected or no image processed yet.")
         }
     }
 }
-
-
+private fun Float.toStringWithDecimals(n: Int) = "%.${n}f".format(this)
 @Preview(showBackground = true)
 @Composable
 fun TextRecognitionScreenPreview() {
-    TextrecognationmlkitTheme {
-        TextRecognitionScreen()
+    ScanTheme {
+        ScanScreen()
     }
 }

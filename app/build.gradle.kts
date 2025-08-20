@@ -9,7 +9,9 @@ plugins {
 android {
     namespace = "com.example.text_recognation_ml_kit"
     compileSdk = 36
-
+    aaptOptions {
+        noCompress += "tflite"
+    }
     defaultConfig {
         applicationId = "com.example.text_recognation_ml_kit"
         minSdk = 24
@@ -51,6 +53,7 @@ dependencies {
     implementation(libs.androidx.ui.tooling.preview)
     implementation(libs.androidx.material3)
     implementation(libs.material3)
+    implementation(libs.litert.gpu)
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
@@ -60,4 +63,12 @@ dependencies {
     debugImplementation(libs.androidx.ui.test.manifest)
     implementation(libs.kotlinx.coroutines.play.services)
     implementation(libs.text.recognition.v1600)
+    implementation(libs.androidx.camera.core)
+    implementation(libs.androidx.camera.camera2)
+    implementation(libs.androidx.camera.lifecycle)
+    implementation(libs.androidx.camera.view)
+
+
+    implementation(libs.object1.detection.custom)
+    implementation(libs.tensorflow.lite)
 }
