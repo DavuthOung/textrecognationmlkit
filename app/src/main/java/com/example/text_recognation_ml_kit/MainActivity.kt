@@ -10,7 +10,6 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -19,10 +18,13 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -32,22 +34,29 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import com.example.text_recognation_ml_kit.ui.theme.ScanTheme
-import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
+import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.text.Text
+import com.google.mlkit.vision.text.TextRecognition
+import com.google.mlkit.vision.text.TextRecognizer
+import com.google.mlkit.vision.text.latin.TextRecognizerOptions
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.tasks.await
 
 
 const val TAG = "ObjectDetectionDemo"
@@ -69,54 +78,80 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-@Composable
-private fun CropCard(crop: CroppedDetection) {
-    Card(
-        modifier = Modifier
-            .width(180.dp)
-            .height(180.dp),
-        elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
-    ) {
-        Box(Modifier.fillMaxSize()) {
-            Image(
-                bitmap = crop.bitmap.asImageBitmap(),
-                contentDescription = "${crop.label.text} crop",
-                modifier = Modifier.fillMaxSize()
-            )
-            // label ribbon
-            Box(
-                modifier = Modifier
-                    .align(Alignment.TopStart)
-                    .padding(6.dp)
-                    .background(
-                        color = Color(0x88000000),
-                        shape = RoundedCornerShape(6.dp)
-                    )
-                    .padding(horizontal = 8.dp, vertical = 4.dp)
-            ) {
-                Text(
-                    text = "${crop.label.text}  ${(crop.label.confidence * 100f).toInt()}%",
-                    color = Color.White,
-                    style = MaterialTheme.typography.labelMedium
-                )
-            }
-        }
+suspend fun ocrAllCrops(crops: List<CroppedDetection>): String? {
+
+    val recognizer: TextRecognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+    var results: String?
+
+    return try {
+        val c = crops[0]
+        val image = InputImage.fromBitmap(c.bitmap, 0)
+        val vt: Text = recognizer.process(image).await()
+        results = vt.text.trim()
+        results
+    } finally {
+        recognizer.close()
     }
 }
 
 
 @Composable
+private fun CropCardWithText(crop: CroppedDetection) {
+    val maxW = 180.dp
+    val maxH = 180.dp
+    val density = LocalDensity.current
+
+    // Use the actual bitmap size (recommended)
+    val bmpW = crop.bitmap.width
+    val bmpH = crop.bitmap.height
+
+    // Compute target dp size that fits within maxW×maxH while preserving aspect ratio
+    val (targetW, targetH) = remember(bmpW, bmpH, maxW, maxH) {
+        with(density) {
+            val maxWPx = maxW.toPx()
+            val maxHPx = maxH.toPx()
+            val scale = minOf(maxWPx / bmpW, maxHPx / bmpH)
+            (bmpW * scale).toDp() to (bmpH * scale).toDp()
+        }
+    }
+
+    Card(elevation = CardDefaults.cardElevation(4.dp)) {
+        Column(Modifier.padding(8.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+            Image(
+                bitmap = crop.bitmap.asImageBitmap(),
+                contentDescription = "${crop.label.text} crop",
+                modifier = Modifier.size(targetW, targetH),
+                contentScale = ContentScale.Fit
+            )
+        }
+    }
+}
+
+fun normalizeMRZText(rawText: String): String {
+    Log.i("Raw", rawText)
+    var normalizedText = ""
+    for (char in rawText) {
+        if(!char.isWhitespace()) {
+            normalizedText += char.uppercase()
+        }
+    }
+    return normalizedText
+}
+
+@Composable
 fun ScanScreen(modifier: Modifier = Modifier) {
     val context = LocalContext.current
-
+    val coroutineScope = rememberCoroutineScope()
     var isLoading by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var imageBitmap by remember { mutableStateOf<Bitmap?>(null) }
 
-    var crops: CroppedDetection
+    var crops by remember { mutableStateOf<List<CroppedDetection>>(emptyList()) }
+
+    val sampleBitmap = BitmapFactory.decodeResource(context.resources, R.drawable.id_card)
 
     // We’ll keep your state shape but use our own Label class
-    val detectedObjectsInfo by remember {
+    var detectedObjectsInfo by remember {
         mutableStateOf<List<Pair<Rect, List<YoloLabel>>>>(emptyList())
     }
 
@@ -126,7 +161,7 @@ fun ScanScreen(modifier: Modifier = Modifier) {
             YoloTFLite(
                 context = context,
                 modelPath = "models/mrz_best_float32.tflite",
-                scoreThreshold = 0.60f,          // <-- as you requested
+                scoreThreshold = 0.60f,
                 iouThreshold = 0.50f
             )
         )
@@ -136,7 +171,7 @@ fun ScanScreen(modifier: Modifier = Modifier) {
         onDispose { yolo.close() }
     }
 
-    fun runYolo(bitmap: Bitmap) {
+    suspend fun runYolo(bitmap: Bitmap) {
         isLoading = true
         errorMessage = null
         detectedObjectsInfo = emptyList()
@@ -153,17 +188,13 @@ fun ScanScreen(modifier: Modifier = Modifier) {
                 clampToImage = true
             )
 
-            // Or: crop and resize each to 320x320 with letterbox (no distortion)
-            val crops320 = cropDetections(
-                src = bitmap,
-                detections = dets,
-                padPx = 4,
-                padRatio = 0.04f,
-                clampToImage = true,
-                targetWidth = 320,
-                targetHeight = 320,
-                letterbox = true
-            )
+            if(crops.isNotEmpty()){
+                val result =  ocrAllCrops(crops)
+                Log.i("CROP", "runYolo: \n${normalizeMRZText(result as String)}")
+            } else {
+                Log.i("CROP", "runYolo: no crops")
+            }
+
 
             // Convert to Compose Rect (original image cords)
             val processed = dets.map { d ->
@@ -194,9 +225,8 @@ fun ScanScreen(modifier: Modifier = Modifier) {
     }
 
     @SuppressLint("LocalContextResourcesRead")
-    fun loadAndProcessSampleImage() {
+    suspend fun loadAndProcessSampleImage() {
         try {
-            val sampleBitmap = BitmapFactory.decodeResource(context.resources, R.drawable.idcard1)
             runYolo(sampleBitmap)
         } catch (e: Exception) {
             errorMessage = "Error loading sample image: ${e.localizedMessage}"
@@ -212,9 +242,14 @@ fun ScanScreen(modifier: Modifier = Modifier) {
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        Button(onClick = { loadAndProcessSampleImage() }) {
-            Text("Detect Objects in Sample Image")
+        Button(onClick = {
+            coroutineScope.launch {
+                loadAndProcessSampleImage()
+            }
+        }) {
+            Text("Detect MRZ")
         }
+
 
         if (isLoading) CircularProgressIndicator()
 
@@ -239,8 +274,8 @@ fun ScanScreen(modifier: Modifier = Modifier) {
 
                         drawRect(
                             color = Color.Red,
-                            topLeft = androidx.compose.ui.geometry.Offset(scaledLeft, scaledTop),
-                            size = androidx.compose.ui.geometry.Size(
+                            topLeft = Offset(scaledLeft, scaledTop),
+                            size = Size(
                                 scaledRight - scaledLeft,
                                 scaledBottom - scaledTop
                             ),
@@ -256,24 +291,13 @@ fun ScanScreen(modifier: Modifier = Modifier) {
             Spacer(Modifier.height(8.dp))
 
             LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                items(count = crops.size, key = { idx -> "${crops[idx].label.index}-$idx" }) { idx ->
-                    CropCard(crop = crops[idx])
+                items(crops.size) { idx ->
+                    val crop = crops[idx]
+                    CropCardWithText(crop = crop)
                 }
             }
         }
 
-        if (detectedObjectsInfo.isNotEmpty()) {
-            Text("Detected Objects:", style = MaterialTheme.typography.headlineSmall)
-            detectedObjectsInfo.forEach { (box, labels) ->
-                Text("Bounding Box: $box")
-                labels.forEach { label ->
-                    Text("  - Label: ${label.text}, Confidence: ${label.confidence.toStringWithDecimals(2)}")
-                }
-                Spacer(modifier = Modifier.height(8.dp))
-            }
-        } else if (!isLoading && errorMessage == null) {
-            Text("No objects detected or no image processed yet.")
-        }
     }
 }
 private fun Float.toStringWithDecimals(n: Int) = "%.${n}f".format(this)

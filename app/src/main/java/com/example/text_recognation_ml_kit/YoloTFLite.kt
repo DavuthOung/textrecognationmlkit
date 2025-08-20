@@ -1,8 +1,15 @@
 package com.example.text_recognation_ml_kit
 import android.content.Context
-import android.graphics.*
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Rect
+import android.graphics.RectF
 import android.util.Log
+import androidx.core.graphics.createBitmap
+import androidx.core.graphics.scale
 import org.tensorflow.lite.Interpreter
+import org.tensorflow.lite.gpu.GpuDelegate
 import java.io.FileInputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -11,11 +18,6 @@ import java.nio.channels.FileChannel
 import kotlin.math.exp
 import kotlin.math.max
 import kotlin.math.min
-import androidx.core.graphics.scale
-import androidx.core.graphics.createBitmap
-import android.graphics.Bitmap
-import android.graphics.RectF
-import org.tensorflow.lite.gpu.GpuDelegate
 import kotlin.math.roundToInt
 
 data class YoloLabel(val text: String, val confidence: Float, val index: Int)
@@ -135,8 +137,8 @@ fun cropDetections(
 
 
 class YoloTFLite(
-    private val context: Context,
-    private val modelPath: String = "models/mrz_best_float32.tflite",
+    context: Context,
+    modelPath: String = "models/mrz_best_float32.tflite",
     private val scoreThreshold: Float = 0.60f,
     private val iouThreshold: Float = 0.50f,
 
@@ -196,7 +198,7 @@ class YoloTFLite(
         val results: List<YoloDetection> = when {
             s.size == 3 && s[0] == 1 && s[1] in 5..6 -> {
                 // channels-first [1, A, N]
-                val A = s[1];
+                val A = s[1]
                 val N = s[2]
                 val cf = Array(1) { Array(A) { FloatArray(N) } } // [1, A, N]
                 interpreter.run(input, cf)
@@ -438,7 +440,7 @@ class YoloTFLite(
     // ------------- Rich debug log -------------
 
     private fun debugReport(image: Bitmap, detections: List<YoloDetection>) {
-        val W = image.width;
+        val W = image.width
         val H = image.height
         val count = detections.size
         Log.i(TAG, "────────────────────────────────────────────")
