@@ -64,6 +64,7 @@ const val TAG = "ObjectDetectionDemo"
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+//        OpenCVInitializer.init()
         enableEdgeToEdge()
         setContent {
             ScanTheme {
@@ -128,7 +129,6 @@ private fun CropCardWithText(crop: CroppedDetection) {
 }
 
 fun normalizeMRZText(rawText: String): String {
-    Log.i("Raw", rawText)
     var normalizedText = ""
     for (char in rawText) {
         if(!char.isWhitespace()) {
@@ -138,6 +138,7 @@ fun normalizeMRZText(rawText: String): String {
     return normalizedText
 }
 
+@SuppressLint("LocalContextResourcesRead")
 @Composable
 fun ScanScreen(modifier: Modifier = Modifier) {
     val context = LocalContext.current
@@ -145,9 +146,8 @@ fun ScanScreen(modifier: Modifier = Modifier) {
     var isLoading by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var imageBitmap by remember { mutableStateOf<Bitmap?>(null) }
-
+    val tesseract = Tesseract(context)
     var crops by remember { mutableStateOf<List<CroppedDetection>>(emptyList()) }
-
     val sampleBitmap = BitmapFactory.decodeResource(context.resources, R.drawable.id_card)
 
     // We’ll keep your state shape but use our own Label class
@@ -171,7 +171,7 @@ fun ScanScreen(modifier: Modifier = Modifier) {
         onDispose { yolo.close() }
     }
 
-    suspend fun runYolo(bitmap: Bitmap) {
+    fun runYolo(bitmap: Bitmap) {
         isLoading = true
         errorMessage = null
         detectedObjectsInfo = emptyList()
@@ -189,8 +189,10 @@ fun ScanScreen(modifier: Modifier = Modifier) {
             )
 
             if(crops.isNotEmpty()){
-                val result =  ocrAllCrops(crops)
-                Log.i("CROP", "runYolo: \n${normalizeMRZText(result as String)}")
+                val mrz = tesseract.extractText(crops[0].bitmap)
+                Log.i("MRZ","$mrz")
+//                val result =  ocrAllCrops(crops)
+//                Log.i("CROP", "runYolo: \n${normalizeMRZText(result as String)}")
             } else {
                 Log.i("CROP", "runYolo: no crops")
             }

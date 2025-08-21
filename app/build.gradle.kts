@@ -18,7 +18,6 @@ android {
         targetSdk = 36
         versionCode = 1
         versionName = "1.0"
-
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -67,8 +66,8 @@ dependencies {
     implementation(libs.androidx.camera.camera2)
     implementation(libs.androidx.camera.lifecycle)
     implementation(libs.androidx.camera.view)
-
-
     implementation(libs.object1.detection.custom)
     implementation(libs.tensorflow.lite)
+    implementation(libs.tesseract4android)
+    implementation(project(":opencv"))
 }
