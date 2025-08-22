@@ -1,0 +1,4 @@
+/home/vuth/Android/Sdk/cmake/3.22.1/bin/ninja \
+  -C \
+  /home/vuth/projects/textrecognationmlkit/OpenCV/.cxx/Debug/p2o4v6p3/arm64-v8a \
+  opencv_jni_shared
