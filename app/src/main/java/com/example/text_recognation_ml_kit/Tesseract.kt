@@ -139,8 +139,6 @@ class Tesseract {
 	var tessBaseAPI: TessBaseAPI? = null
 	private var currentLanguage: String? = null // Keep track of current language
 	val context: Context
-	private val TAG = "TesseractHelper"
-
 
 	constructor(context: Context, defaultLanguage: String = "ocrb") { // Default to "eng" or your common lang
 		this.context = context.applicationContext // Use application context
@@ -151,10 +149,7 @@ class Tesseract {
 		initializeTesseract(defaultLanguage)
 	}
 
-
 	fun initializeTesseract(language: String): Boolean {
-		// ... (existing checks and cleanup) ...
-
 		tessBaseAPI = TessBaseAPI()
 		currentLanguage = null
 
@@ -208,10 +203,10 @@ class Tesseract {
 			return null
 		}
 
-
 		tessBaseAPI!!.setImage(bitmap)
 		val text = tessBaseAPI!!.utF8Text
 		Log.d(TAG, "Extracted text for language '$language': ${text?.take(100)}...") // Log a snippet
+		destroy() // Optionally destroy after use, or keep it alive for further calls
 		return text
 	}
 

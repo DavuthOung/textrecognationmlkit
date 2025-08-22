@@ -49,22 +49,22 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.example.text_recognation_ml_kit.ui.theme.ScanTheme
-import com.google.mlkit.vision.common.InputImage
-import com.google.mlkit.vision.text.Text
-import com.google.mlkit.vision.text.TextRecognition
-import com.google.mlkit.vision.text.TextRecognizer
-import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.tasks.await
-
+import org.opencv.android.OpenCVLoader
+import org.opencv.android.Utils
+import org.opencv.imgproc.Imgproc
+import androidx.core.graphics.createBitmap
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import org.opencv.core.Mat
 
 const val TAG = "ObjectDetectionDemo"
-
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-//        OpenCVInitializer.init()
+
         enableEdgeToEdge()
         setContent {
             ScanTheme {
@@ -78,23 +78,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 }
-
-suspend fun ocrAllCrops(crops: List<CroppedDetection>): String? {
-
-    val recognizer: TextRecognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
-    var results: String?
-
-    return try {
-        val c = crops[0]
-        val image = InputImage.fromBitmap(c.bitmap, 0)
-        val vt: Text = recognizer.process(image).await()
-        results = vt.text.trim()
-        results
-    } finally {
-        recognizer.close()
-    }
-}
-
 
 @Composable
 private fun CropCardWithText(crop: CroppedDetection) {
@@ -128,16 +111,6 @@ private fun CropCardWithText(crop: CroppedDetection) {
     }
 }
 
-fun normalizeMRZText(rawText: String): String {
-    var normalizedText = ""
-    for (char in rawText) {
-        if(!char.isWhitespace()) {
-            normalizedText += char.uppercase()
-        }
-    }
-    return normalizedText
-}
-
 @SuppressLint("LocalContextResourcesRead")
 @Composable
 fun ScanScreen(modifier: Modifier = Modifier) {
@@ -146,16 +119,22 @@ fun ScanScreen(modifier: Modifier = Modifier) {
     var isLoading by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var imageBitmap by remember { mutableStateOf<Bitmap?>(null) }
-    val tesseract = Tesseract(context)
+    val tesseract = Tesseract(context) // Assuming Tesseract class is correctly implemented
     var crops by remember { mutableStateOf<List<CroppedDetection>>(emptyList()) }
     val sampleBitmap = BitmapFactory.decodeResource(context.resources, R.drawable.id_card)
 
-    // We’ll keep your state shape but use our own Label class
+    // --- SOLUTION: Declare uiStateVariable as Compose State ---
+    var uiStateVariable by remember { mutableStateOf<String?>("Tap 'Detect MRZ' to start") }
+
     var detectedObjectsInfo by remember {
         mutableStateOf<List<Pair<Rect, List<YoloLabel>>>>(emptyList())
     }
 
-    // Create the YOLO interpreter once
+    suspend fun extractTextWithTesseract(tesseract: Tesseract, bitmap: Bitmap): String =
+        withContext(Dispatchers.Default) {
+            tesseract.extractText(bitmap) as String // Ensure Tesseract's extractText is safe to call from background
+        }
+
     val yolo by remember {
         mutableStateOf(
             YoloTFLite(
@@ -171,69 +150,144 @@ fun ScanScreen(modifier: Modifier = Modifier) {
         onDispose { yolo.close() }
     }
 
-    fun runYolo(bitmap: Bitmap) {
-        isLoading = true
-        errorMessage = null
-        detectedObjectsInfo = emptyList()
-        imageBitmap = bitmap
+    suspend fun runYolo(bitmapToProcess: Bitmap) { // Renamed parameter to avoid confusion with state
+        withContext(Dispatchers.Main) {
+            isLoading = true
+            errorMessage = null
+            imageBitmap = bitmapToProcess // Update the displayed image
+            detectedObjectsInfo = emptyList()
+            uiStateVariable = "Processing..." // Initial message during processing
+        }
 
         try {
-            val dets: List<YoloDetection> = yolo.detect(bitmap)
-            // Crop with +6% padding and clamp to image, keep original size
-            crops = cropDetections(
-                src = bitmap,
-                detections = dets,
-                padPx = 0,
-                padRatio = 0.06f,       // add ~6% around each side
-                clampToImage = true
-            )
-
-            if(crops.isNotEmpty()){
-                val mrz = tesseract.extractText(crops[0].bitmap)
-                Log.i("MRZ","$mrz")
-//                val result =  ocrAllCrops(crops)
-//                Log.i("CROP", "runYolo: \n${normalizeMRZText(result as String)}")
-            } else {
-                Log.i("CROP", "runYolo: no crops")
+            val dets: List<YoloDetection> = withContext(Dispatchers.Default) {
+                yolo.detect(bitmapToProcess)
             }
 
-
-            // Convert to Compose Rect (original image cords)
-            val processed = dets.map { d ->
-                val box = Rect(
-                    left = d.box.left,
-                    top = d.box.top,
-                    right = d.box.right,
-                    bottom = d.box.bottom
+            val currentCrops = withContext(Dispatchers.Default) {
+                cropDetections(
+                    src = bitmapToProcess,
+                    detections = dets,
+                    padPx = 0,
+                    padRatio = 0.06f,
+                    clampToImage = true
                 )
-                box to listOf(d.label)
             }
-            detectedObjectsInfo = processed
-            isLoading = false
+            // Update the crops state on the main thread
+            withContext(Dispatchers.Main) {
+                crops = currentCrops
+            }
 
-            if (dets.isEmpty()) {
-                Log.i(TAG, "No objects detected.")
+
+            if (currentCrops.isNotEmpty()) {
+                if (OpenCVLoader.initLocal()) { // Or any other OpenCV init method
+                    Log.i(TAG, "OpenCV loaded successfully")
+
+                    val firstCropOriginalBitmap = currentCrops[0].bitmap
+
+                    val inputMat = Mat()
+                    withContext(Dispatchers.Default) {
+                        Utils.bitmapToMat(firstCropOriginalBitmap, inputMat)
+                        Imgproc.cvtColor(inputMat, inputMat, Imgproc.COLOR_RGBA2BGR)
+                    }
+
+                    val preprocessedMat = preprocessForOcrAdvanced( // This is a suspend function
+                        inputBgr = inputMat,
+                        targetDpi = 300,
+                        estimatedSourceDpi = 150,
+                        denoiseStrength = 8f,
+                        binarizationMethod = "ADAPTIVE_GAUSSIAN",
+                        adaptiveBlockSize = 15,
+                        adaptiveC = 4.0,
+                        attemptDeskew = true
+                    )
+                    inputMat.release()
+
+                    if (!preprocessedMat.empty()) {
+                        val preprocessedBitmapForTesseract = withContext(Dispatchers.Default) {
+                            val tempBitmap = createBitmap(
+                                preprocessedMat.cols(),
+                                preprocessedMat.rows(),
+                                Bitmap.Config.ARGB_8888
+                            )
+                            val tempRgbaMat = Mat()
+                            Imgproc.cvtColor(preprocessedMat, tempRgbaMat, Imgproc.COLOR_BGR2RGBA)
+                            Utils.matToBitmap(tempRgbaMat, tempBitmap)
+                            tempRgbaMat.release()
+                            tempBitmap // Return the bitmap
+                        }
+                        preprocessedMat.release()
+
+                        val mrzText = extractTextWithTesseract(tesseract, preprocessedBitmapForTesseract)
+                        val parsedInfo = MrzParser.parse(mrzText)
+                        withContext(Dispatchers.Main) {
+                            Log.i("MRZ_PREPROCESSED", mrzText)
+                            uiStateVariable = mrzText // This will now trigger recomposition
+                            if (parsedInfo.parsingErrors.isNotEmpty()) {
+                                Log.e("MRZ_APP", "Parsing Errors: ${parsedInfo.parsingErrors.joinToString("\n")}")
+                                // Update UI to show "Could not parse MRZ" or specific errors
+                            } else {
+                                Log.i("MRZ_APP", "Parsed Successfully: $parsedInfo")
+                                // Update your UI state variables with fields from parsedInfo
+                                // e.g., uiSurnameState = parsedInfo.surname
+                                //       uiDobState = formatMyDate(parsedInfo.dateOfBirth) // you'll need a date formatter
+                                //       uiOverallValidityState = parsedInfo.overallValid.toString()
+                            }
+                        }
+                    } else {
+                        Log.w(TAG, "Preprocessing resulted in an empty Mat.")
+                        withContext(Dispatchers.Main) {
+                            uiStateVariable = "Preprocessing failed (empty result)"
+                        }
+                    }
+                } else {
+                    Log.e(TAG, "OpenCV initialization failed!")
+                    withContext(Dispatchers.Main) {
+                        uiStateVariable = "OpenCV init failed"
+                    }
+                }
             } else {
-                dets.forEachIndexed { idx, d ->
-                    Log.i(TAG, "Detection #$idx -> ${d.label.text} (${d.label.confidence.toStringWithDecimals(2)})")
-                    Log.i(TAG, "Rect: L=${d.box.left.toInt()} T=${d.box.top.toInt()} R=${d.box.right.toInt()} B=${d.box.bottom.toInt()}")
+                withContext(Dispatchers.Main) {
+                    uiStateVariable = "No MRZ detected to process."
+                }
+            }
+
+            withContext(Dispatchers.Main) {
+                val processedInfo = dets.map { d ->
+                    val box = Rect(d.box.left, d.box.top, d.box.right, d.box.bottom)
+                    box to listOf(d.label)
+                }
+                detectedObjectsInfo = processedInfo
+                isLoading = false
+
+                if (dets.isEmpty()) Log.i(TAG, "No objects detected.")
+                else dets.forEachIndexed { idx, d ->
+                    Log.i(
+                        TAG,
+                        "Detection #$idx -> ${d.label.text} (${
+                            d.label.confidence.toStringWithDecimals(2)
+                        })"
+                    )
+                }
+                if (uiStateVariable == "Processing...") { // If OCR didn't update it
+                    uiStateVariable =
+                        if (dets.isNotEmpty() && currentCrops.isEmpty()) "Objects detected, but no MRZ crop found." else "Detection complete."
                 }
             }
         } catch (e: Exception) {
-            isLoading = false
-            errorMessage = "Detection failed: ${e.localizedMessage}"
-            Log.e(TAG, "YOLO detection error", e)
+            Log.e(TAG, "Processing error in runYolo", e)
+            withContext(Dispatchers.Main) {
+                isLoading = false
+                errorMessage = "Processing failed: ${e.localizedMessage}"
+                uiStateVariable = "Error: ${e.localizedMessage?.take(100)}"
+            }
         }
     }
 
+
     @SuppressLint("LocalContextResourcesRead")
     suspend fun loadAndProcessSampleImage() {
-        try {
-            runYolo(sampleBitmap)
-        } catch (e: Exception) {
-            errorMessage = "Error loading sample image: ${e.localizedMessage}"
-            Log.e(TAG, "Error loading sample image", e)
-        }
+        runYolo(sampleBitmap) // Pass the sampleBitmap to runYolo
     }
 
     Column(
@@ -252,7 +306,6 @@ fun ScanScreen(modifier: Modifier = Modifier) {
             Text("Detect MRZ")
         }
 
-
         if (isLoading) CircularProgressIndicator()
 
         errorMessage?.let { Text(text = "Error: $it", color = MaterialTheme.colorScheme.error) }
@@ -268,7 +321,7 @@ fun ScanScreen(modifier: Modifier = Modifier) {
                     val scaleX = size.width / bmp.width.toFloat()
                     val scaleY = size.height / bmp.height.toFloat()
 
-                    detectedObjectsInfo.forEach { (box) ->
+                    detectedObjectsInfo.forEach { (box, _) -> // Changed from (box) to (box, _)
                         val scaledLeft = box.left * scaleX
                         val scaledTop = box.top * scaleY
                         val scaledRight = box.right * scaleX
@@ -277,10 +330,7 @@ fun ScanScreen(modifier: Modifier = Modifier) {
                         drawRect(
                             color = Color.Red,
                             topLeft = Offset(scaledLeft, scaledTop),
-                            size = Size(
-                                scaledRight - scaledLeft,
-                                scaledBottom - scaledTop
-                            ),
+                            size = Size(scaledRight - scaledLeft, scaledBottom - scaledTop),
                             style = Stroke(width = 2.dp.toPx())
                         )
                     }
@@ -295,13 +345,20 @@ fun ScanScreen(modifier: Modifier = Modifier) {
             LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 items(crops.size) { idx ->
                     val crop = crops[idx]
-                    CropCardWithText(crop = crop)
+                    CropCardWithText(crop = crop) // Ensure CropCardWithText is implemented
                 }
             }
         }
 
+        Text(
+            text = "Detected Text: ${uiStateVariable ?: "N/A"}", // Provide a fallback if null
+            style = MaterialTheme.typography.headlineSmall.copy(
+                fontSize = 14.sp
+            )
+        )
     }
 }
+
 private fun Float.toStringWithDecimals(n: Int) = "%.${n}f".format(this)
 @Preview(showBackground = true)
 @Composable
